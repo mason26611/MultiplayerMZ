@@ -3,7 +3,8 @@
 //=============================================================================
 
 /*:
- * @plugindesc A simple wrapper for creating and handling events in your plugins. Press Help to see usage info.
+ * @target MZ
+ * @plugindesc v1.1 A simple wrapper for creating and handling events in your plugins. Press Help to see usage info.
  * @author Alphaxaon
  *
  * @help // Create a new event
@@ -48,6 +49,10 @@ class MapEvent {
      * Automatically set the id for the event.
      */
     setId() {
+        if (!$dataMap || !$dataMap.events) {
+            console.error('$dataMap or $dataMap.events is not initialized');
+            return 1;
+        }
         return $dataMap.events.length;
     }
 
@@ -165,9 +170,25 @@ class MapEvent {
      * Create a new Game_Event object and store it in $gameMap.
      */
     createGameEvent() {
-        $gameMap._events.push(new Game_Event($gameMap._mapId, this.data.id));
+        if (!$gameMap) {
+            console.error('$gameMap is not initialized');
+            return null;
+        }
 
-        return $gameMap.event(this.data.id);
+        if (!$gameMap._events) {
+            console.error('$gameMap._events is not initialized');
+            return null;
+        }
+
+        try {
+            const gameEvent = new Game_Event($gameMap._mapId, this.data.id);
+            $gameMap._events[this.data.id] = gameEvent;
+            console.log('Game_Event created successfully with ID:', this.data.id);
+            return gameEvent;
+        } catch (error) {
+            console.error('Error creating Game_Event:', error);
+            return null;
+        }
     }
 
     /**
@@ -176,9 +197,16 @@ class MapEvent {
      * @param event (Game_Event)
      */
     createCharacterSprite(event) {
-        SceneManager._scene._spriteset._characterSprites.push(new Sprite_Character(event));
+        const spriteset = SceneManager._scene._spriteset;
+        if (!spriteset) {
+            console.error('Spriteset not found when creating character sprite');
+            return null;
+        }
 
-        return SceneManager._scene._spriteset._characterSprites[SceneManager._scene._spriteset._characterSprites.length - 1];
+        const sprite = new Sprite_Character(event);
+        spriteset._characterSprites.push(sprite);
+
+        return sprite;
     }
 
     /**
@@ -187,7 +215,23 @@ class MapEvent {
      * @param sprite (Sprite_Character)
      */
     addSpriteToTilemap(sprite) {
-        SceneManager._scene._spriteset._tilemap.addChild(sprite);
+        if (!sprite) {
+            console.error('Sprite is null, cannot add to tilemap');
+            return;
+        }
+
+        const spriteset = SceneManager._scene._spriteset;
+        if (!spriteset) {
+            console.error('Spriteset not found when adding sprite to tilemap');
+            return;
+        }
+
+        // In MZ, we add to the tilemap's character layer
+        if (spriteset._tilemap) {
+            spriteset._tilemap.addChild(sprite);
+        } else {
+            console.error('Tilemap not found in spriteset');
+        }
     }
 
     /**
@@ -252,12 +296,27 @@ class MapEvent {
     spawn(x, y) {
         this.setPosition(x, y);
 
-        $dataMap.events.push(this.data);
-        var event = this.createGameEvent();
-        var sprite = this.createCharacterSprite(event);
+        // Check if we're in a scene with a map
+        if (!SceneManager._scene || !SceneManager._scene._spriteset) {
+            console.error('Cannot spawn event: Scene or spriteset not ready');
+            return null;
+        }
+
+        // Set event data at the correct index (event ID)
+        $dataMap.events[this.data.id] = this.data;
+
+        const event = this.createGameEvent();
+
+        if (!event) {
+            console.error('Failed to create game event');
+            return null;
+        }
+
+        const sprite = this.createCharacterSprite(event);
         this.addSpriteToTilemap(sprite);
         
-        console.log('New event created!');
+        console.log('New event created with ID:', this.data.id, 'at position', x, y);
+        return event;
     }
 }
 
@@ -287,10 +346,10 @@ class MapEvent {
             var mapId = Number(ids[0]);
             var eventId = Number(ids[1]);
 
-            if (mapId != $gameMap._mapId)
+            if (mapId !== $gameMap._mapId)
                 continue;
 
-            if (!eventIds.contains(eventId))
+            if (!eventIds.includes(eventId))
                 delete $gameSelfSwitches._data[key];
         }
     };
