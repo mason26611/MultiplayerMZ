@@ -53,6 +53,11 @@
     let socket;
     let username;
 
+    // Hook isGameActive to always return true so that the game doesn't pause when losing focus
+    SceneManager.isGameActive = function() {
+        return true
+    }
+
     // Hook into player movement to send updates to server once the player moves
     const _Scene_Map_start = Scene_Map.prototype.start;
     Scene_Map.prototype.start = function () {
@@ -126,7 +131,7 @@
             console.log('current players:', players)
             for (const player of players) {
                 if (player.username === username) {
-                    return
+                    continue;
                 }
                 createMultiplayerPlayer(player);
             }
@@ -147,25 +152,33 @@
             console.log(`Moving player ${username} to (${x}, ${y})`);
         }
 
-        const image = event.data.pages[0].image;
-        const isLeft = x < event.x;
-        const isUp = y < event.y;
-
-        if (isLeft) {
-            // Left
-            image.direction = 4;
-        } else {
-            // Right
-            image.direction = 6;
+        // Get the underlying Game_Event object
+        const gameEvent = $gameMap._events[event.data.id];
+        if (!gameEvent) {
+            if (DEBUG_MODE) {
+                console.log("No game event found for username:", username);
+            }
+            return;
         }
 
+        // Determine direction based on movement
+        const isLeft = x < gameEvent.x;
+        const isRight = x > gameEvent.x;
+        const isUp = y < gameEvent.y;
+        const isDown = y > gameEvent.y;
+
+        // Set the direction
         if (isUp) {
-            // Up
-            image.direction = 8;
-        } else {
-            // Down
-            image.direction = 2;
+            gameEvent.setDirection(8); // Up
+        } else if (isDown) {
+            gameEvent.setDirection(2); // Down
+        } else if (isLeft) {
+            gameEvent.setDirection(4); // Left
+        } else if (isRight) {
+            gameEvent.setDirection(6); // Right
         }
+
+        gameEvent.setPosition(x, y);
     }
 
     // Creates a fake player sprite using events with sprites attached
