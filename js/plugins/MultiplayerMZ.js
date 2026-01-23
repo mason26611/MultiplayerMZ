@@ -3,6 +3,8 @@
  * @plugindesc v1.0 A plugin that facilitates multiplayer in RPG Maker MZ.
  * @author Mason Gover
  *
+ * Requires a backend server running from https://github.com/mason26611/MultiplayerMZ-Backend
+ *
  * ------------------------------------------
  * PARAMETERS
  * ------------------------------------------
@@ -19,22 +21,6 @@
  * @type boolean
  * @default true
  * @desc If true, logs info to the console.
- *
- * ------------------------------------------
- * COMMANDS
- * ------------------------------------------
- *
- * @command showGreeting
- * @text Show Greeting
- * @desc Displays the greeting text in a message window.
- *
- * @arg overrideText
- * @text Override Text
- * @type string
- * @default
- * @desc Optional text to override the greeting parameter.
- *
- * ------------------------------------------
 */
 
 (() => {
@@ -43,13 +29,208 @@
     const BACKEND_SERVER_URL = parameters["backendServerUrl"]
     const DEBUG_MODE = parameters["enableDebug"]
 
-    function createPlayerEvent(x, y, characterName, characterIndex) {
+    // Each player is an event with a sprite attached, and we need to store all of those events
+    // [username] = { eventData, gameEvent, partyMembers: [ }
+    const playerEvents = {}
+
+    // Store target positions for syncing after movement completes
+    // [username] = { x, y }
+    const playerTargetPositions = {}
+
+    // Store local socket and username info for this client
+    let socket;
+    let username;
+
+    // Hook isGameActive to always return true so that the game doesn't pause when losing focus
+    SceneManager.isGameActive = function() {
+        return true
+    }
+
+    // Hook into player movement to send updates to server once the player moves
+    const _Scene_Map_start = Scene_Map.prototype.start;
+    Scene_Map.prototype.start = function () {
+        _Scene_Map_start.call(this);
+
+        // Once the game is loaded, request the current players from the server
+        // This is so we can spawn the existing players into the game
+        if (socket) {
+            socket.emit("request_current_players");
+
+            // Send party member IDs when map starts in case party composition changed
+            sendPartyMemberIds();
+        }
+
+        const _Game_Player_moveStraight = Game_Player.prototype.moveStraight;
+        Game_Player.prototype.moveStraight = function (d) {
+            _Game_Player_moveStraight.call(this, d);
+            if (!socket || !username) {
+                if (DEBUG_MODE) {
+                    console.log("Socket or username not initialized, cannot send movement. Uh ok.");
+                }
+                return;
+            }
+
+            if (DEBUG_MODE) {
+                console.log("Sending player movement to server");
+            }
+
+            socket.emit("move_player", {
+                username: username,
+                x: this.x,
+                y: this.y
+            });
+        }
+
+        const _Game_Follower_moveStraight = Game_Follower.prototype.moveStraight;
+        Game_Follower.prototype.moveStraight = function (d) {
+            _Game_Follower_moveStraight.call(this, d);
+            if (!socket || !username) {
+                if (DEBUG_MODE) {
+                    console.log("Socket or username not initialized, cannot send follower movement.");
+                }
+                return;
+            }
+
+            if (DEBUG_MODE) {
+                console.log("Sending follower movement to server");
+            }
+
+            socket.emit("move_party_member", {
+                username: username,
+                memberId: this._memberIndex,
+                x: this.x,
+                y: this.y
+            });
+        }
+    };
+
+    // Hook into Scene_Map update to check for completed movement routes
+    const _Scene_Map_update = Scene_Map.prototype.update;
+    Scene_Map.prototype.update = function() {
+        _Scene_Map_update.call(this);
+        checkPlayerMovementComplete();
+    };
+
+    // Check if any player has completed their movement route and sync position
+    function checkPlayerMovementComplete() {
+        for (const username in playerTargetPositions) {
+            const playerEvent = playerEvents[username];
+            if (!playerEvent) continue;
+
+            const gameEvent = playerEvent.gameEvent;
+            const targetPos = playerTargetPositions[username];
+
+            // Check if the movement route has finished
+            if (!gameEvent.isMoveRouteForcing()) {
+                // Movement complete, snap to exact target position to avoid desync
+                if (gameEvent.x !== targetPos.x || gameEvent.y !== targetPos.y) {
+                    if (DEBUG_MODE) {
+                        console.log(`Syncing ${username} from (${gameEvent.x}, ${gameEvent.y}) to target (${targetPos.x}, ${targetPos.y})`);
+                    }
+                    gameEvent.locate(targetPos.x, targetPos.y);
+                }
+
+                // Clear the target position after syncing
+                delete playerTargetPositions[username];
+            }
+        }
+    }
+
+    // Load socket.io
+    if (typeof io === "undefined") {
+        let script = document.createElement("script");
+        script.src = "https://cdn.socket.io/4.7.2/socket.io.min.js";
+        script.onload = function () {
+            startSocketConnection(); // Call function to initialize socket after loading
+        };
+        document.head.appendChild(script);
+    } else {
+        startSocketConnection();
+    }
+
+    function startSocketConnection() {
+        // Make connection to backend address
+        socket = io(BACKEND_SERVER_URL);
+        console.log("starting socket connection to", BACKEND_SERVER_URL);
+
+        socket.on("connected", (data) => {
+            username = data.username;
+
+            // Send party member IDs to the server
+            sendPartyMemberIds();
+        });
+
+        socket.on("player_connected", (data) => {
+            createMultiplayerPlayer(data);
+        });
+
+        socket.on("player_disconnected", (data) => {
+            const playerEvent = playerEvents[data.username];
+            if (playerEvent && playerEvent.gameEvent) {
+                // Remove all party members attached to this player
+                for (const memberId in playerEvent.partyMembers) {
+                    const partyMember = playerEvent.partyMembers[memberId];
+                    if (partyMember && partyMember.gameEvent) {
+                        partyMember.gameEvent.erase();
+                        delete playerEvent.partyMembers[memberId];
+                    }
+                }
+
+                // Remove the player
+                playerEvent.gameEvent.erase()
+                delete playerEvents[data.username];
+            }
+        });
+
+        socket.on("player_moved", (data) => {
+            // Ignore our own movement updates because our client handles our own movement
+            if (data.username === username) {
+                return;
+            }
+
+            moveTo(data.username, data.x, data.y)
+        });
+
+        socket.on("party_member_moved", (data) => {
+            // Ignore our own movement updates because our client handles our own movement
+            if (data.username === username) {
+                return;
+            }
+
+            // todo
+        })
+
+        socket.on("current_players", (players) => {
+            for (const player of players) {
+                if (player.username === username) {
+                    continue;
+                }
+                createMultiplayerPlayer(player);
+            }
+        });
+
+        socket.on("player_party_updated", (data) => {
+            // Ignore our own party updates
+            if (data.username === username) {
+                return;
+            }
+
+            if (DEBUG_MODE) {
+                console.log(`Player ${data.username} party updated:`, data.partyMembers);
+            }
+
+            updatePlayerPartyMembers(data.username, data.partyMembers);
+        });
+    }
+
+    // Creates a player event at the specified position with the given character sprite
+    function createPlayerEvent(x, y, characterName, characterIndex, isPartyMember = false) {
         const eventId = $dataMap.events.length;
 
         // Create event data
         const eventData = {
             id: eventId,
-            name: "Player" + eventId,
+            name: !isPartyMember ? "Player_" + eventId : "PartyMember_" + eventId,
             x: x,
             y: y,
             pages: [{
@@ -105,101 +286,8 @@
         return { eventData, gameEvent };
     }
 
-    // Each player is an event with a sprite attached, and we need to store all of those events
-    // Attached to their usernames
-    const playerEvents = {}
-
-    // Store local socket and username info for this client
-    let socket;
-    let username;
-
-    // Hook isGameActive to always return true so that the game doesn't pause when losing focus
-    SceneManager.isGameActive = function() {
-        return true
-    }
-
-    // Hook into player movement to send updates to server once the player moves
-    const _Scene_Map_start = Scene_Map.prototype.start;
-    Scene_Map.prototype.start = function () {
-        _Scene_Map_start.call(this);
-
-        // Once the game is loaded, request the current players from the server
-        // This is so we can spawn the existing players into the game
-        if (socket) {
-            socket.emit('request_current_players');
-        }
-
-        const _Game_Player_moveStraight = Game_Player.prototype.moveStraight;
-        Game_Player.prototype.moveStraight = function (d) {
-            _Game_Player_moveStraight.call(this, d);
-            if (!socket || !username) {
-                if (DEBUG_MODE) {
-                    console.log("Socket or username not initialized, cannot send movement. Uh ok.");
-                }
-                return;
-            }
-
-            if (DEBUG_MODE) {
-                console.log("Sending player movement to server");
-            }
-            socket.emit('move_player', {
-                username: username,
-                x: this.x,
-                y: this.y
-            })
-        }
-    };
-
-    // Load socket.io
-    if (typeof io === "undefined") {
-        let script = document.createElement("script");
-        script.src = "https://cdn.socket.io/4.7.2/socket.io.min.js";
-        script.onload = function () {
-            startSocketConnection(); // Call function to initialize socket after loading
-        };
-        document.head.appendChild(script);
-    } else {
-        startSocketConnection();
-    }
-
-    function startSocketConnection() {
-        // Make connection to backend address
-        socket = io(BACKEND_SERVER_URL);
-        console.log('starting socket connection to', BACKEND_SERVER_URL);
-
-        socket.on('connected', (data) => {
-            console.log('connected event received', data);
-            username = data.username;
-        });
-
-        socket.on('player_connected', (data) => {
-            console.log('a player has connected to the game')
-            createMultiplayerPlayer(data);
-        });
-
-        socket.on('player_moved', (data) => {
-            // Ignore our own movement updates because our client handles our own movement
-            if (data.username === username) {
-                return;
-            }
-
-            console.log('player moved event received', data);
-            rpc_moveTo(data.username, data.x, data.y)
-        });
-
-        socket.on('current_players', (players) => {
-            console.log('current players:', players)
-            for (const player of players) {
-                if (player.username === username) {
-                    continue;
-                }
-                createMultiplayerPlayer(player);
-            }
-        })
-    }
-
     // Handles other players movements
-    function rpc_moveTo(username, x, y) {
+    function moveTo(username, x, y) {
         const playerEvent = playerEvents[username];
         if (!playerEvent) {
             if (DEBUG_MODE) {
@@ -214,25 +302,117 @@
             console.log(`Moving player ${username} to (${x}, ${y})`);
         }
 
+        // Store the target position for syncing after movement completes
+        playerTargetPositions[username] = { x: x, y: y };
 
-        // Determine direction based on movement
-        const isLeft = x < gameEvent.x;
-        const isRight = x > gameEvent.x;
-        const isUp = y < gameEvent.y;
-        const isDown = y > gameEvent.y;
+        // Configure the event to move smoothly with a walk animation and match the speed of normal players
+        gameEvent.setStepAnime(true)
+        gameEvent.setMoveSpeed(5);
 
-        // Set the direction
-        if (isUp) {
-            gameEvent.setDirection(8); // Up
-        } else if (isDown) {
-            gameEvent.setDirection(2); // Down
-        } else if (isLeft) {
-            gameEvent.setDirection(4); // Left
-        } else if (isRight) {
-            gameEvent.setDirection(6); // Right
+        // Calculate the distance from current position to target
+        const distanceX = x - gameEvent.x;
+        const distanceY = y - gameEvent.y;
+
+        // Build movement route for smooth movement
+        const moveRoute = {
+            list: [],
+            repeat: false,
+            skippable: false,
+            wait: false
+        };
+
+        // Push all vertical movements
+        for (let i = 0; i < Math.abs(distanceY); i++) {
+            if (distanceY > 0) {
+                moveRoute.list.push({ code: 1 }); // Move Down
+            } else if (distanceY < 0) {
+                moveRoute.list.push({ code: 4 }); // Move Up
+            }
         }
 
-        gameEvent.setPosition(x, y);
+        // Push all horizontal movements
+        for (let i = 0; i < Math.abs(distanceX); i++) {
+            if (distanceX < 0) {
+                moveRoute.list.push({ code: 2 }); // Move Left
+            } else if (distanceX > 0) {
+                moveRoute.list.push({ code: 3 }); // Move Right
+            }
+        }
+
+        // Indicate that the route is finished and play the movement route
+        moveRoute.list.push({ code: 0 });
+        gameEvent.forceMoveRoute(moveRoute);
+    }
+
+    // Send party member IDs to the server
+    function sendPartyMemberIds() {
+        if (!socket || !username) {
+            if (DEBUG_MODE) {
+                console.log("Socket or username not initialized, cannot send party member IDs");
+            }
+            return;
+        }
+
+        // Get the party member ids
+        const partyMemberIds = $gameParty.battleMembers().map(actor => actor.actorId());
+
+        if (DEBUG_MODE) {
+            console.log("Sending party member IDs to server:", partyMemberIds);
+        }
+
+        socket.emit("set_party_members", {
+            partyMemberIds: partyMemberIds
+        });
+    }
+
+    // Update another player's party members
+    function updatePlayerPartyMembers(username, partyMemberIds) {
+        const playerEvent = playerEvents[username];
+        if (!playerEvent) {
+            if (DEBUG_MODE) {
+                console.log("No event found for username:", username);
+            }
+            return;
+        }
+
+        // Remove existing party members
+        if (playerEvent.partyMembers) {
+            for (const partyMember of playerEvent.partyMembers) {
+                if (partyMember && partyMember.gameEvent) {
+                    partyMember.gameEvent.erase();
+                }
+            }
+        }
+
+        // Create new party members based on the updated IDs
+        playerEvent.partyMembers = [];
+        for (let i = 0; i < partyMemberIds.length - 1; i++) { // -1 because the leader is not a follower
+            const actorId = partyMemberIds[i + 1]; // Skip the first actor cuz leader
+            if (!actorId) continue;
+
+            if (DEBUG_MODE) {
+                console.log(`Creating party member ${i + 1} (Actor ID: ${actorId}) for player ${username}`);
+            }
+
+            // Get the actor data to determine the character sprite
+            const actor = $dataActors[actorId];
+            if (!actor) {
+                console.error(`Actor with ID ${actorId} not found`);
+                continue;
+            }
+
+            // Create the party member event with the correct character sprite
+            const partyMember = createPlayerEvent(
+                playerEvent.gameEvent.x,
+                playerEvent.gameEvent.y + i + 1,
+                actor.characterName,
+                actor.characterIndex,
+                true
+            );
+
+            partyMember.gameEvent.setThrough(true);
+            playerEvent.partyMembers.push(partyMember);
+        }
     }
 
     // Creates a fake player sprite using events with sprites attached
@@ -243,29 +423,63 @@
         }
 
         if (DEBUG_MODE) {
-            console.log('Creating multiplayer player at', data.x, data.y);
+            console.log("Creating multiplayer player at", data);
         }
 
         // Check if we're in a valid game state
         if (!$gameMap || !$dataMap) {
-            console.error('Cannot create multiplayer player: Game not initialized');
             return;
         }
 
         // Check if we're in a map scene or else bad things may happen
         if (!SceneManager._scene || !SceneManager._scene._spriteset) {
-            console.error('Cannot create multiplayer player: Not in map scene');
+            console.error("Cannot create multiplayer player: Not in map scene");
             return;
         }
 
         try {
             playerEvents[data.username] = createPlayerEvent(data.x, data.y, "Actor1", 0);
+            const player = playerEvents[data.username];
+
+            // Initialize party members array
+            player.partyMembers = [];
+
+            // If the player has party member data, create them
+            if (data.partyMembers && data.partyMembers.length > 1) {
+                for (let i = 1; i < data.partyMembers.length; i++) {
+                    const actorId = data.partyMembers[i];
+                    if (!actorId) continue;
+
+                    if (DEBUG_MODE) {
+                        console.log(`Creating party member ${i} (Actor ID: ${actorId}) for player ${data.username}`);
+                    }
+
+                    // Get the actor data to determine the character sprite
+                    const actor = $dataActors[actorId];
+                    if (!actor) {
+                        console.error(`Actor with ID ${actorId} not found`);
+                        continue;
+                    }
+
+                    // Create the party member event with the correct character sprite
+                    const partyMember = createPlayerEvent(
+                        data.x,
+                        data.y + i,
+                        actor.characterName,
+                        actor.characterIndex,
+                        true
+                    );
+                    partyMember.gameEvent.setThrough(true);
+
+                    player.partyMembers.push(partyMember);
+                }
+            }
 
             if (DEBUG_MODE) {
-                console.log('Multiplayer player created successfully');
+                console.log("Multiplayer player created successfully");
             }
         } catch (error) {
-            console.error('Error creating multiplayer player:', error);
+            console.error("Error creating multiplayer player:", error);
         }
     }
 })();
