@@ -3,8 +3,6 @@
  * @plugindesc v1.0 A plugin that facilitates multiplayer in RPG Maker MZ.
  * @author Mason Gover
  *
- * Requires EventWrapper
- *
  * ------------------------------------------
  * PARAMETERS
  * ------------------------------------------
@@ -44,6 +42,68 @@
     const parameters = PluginManager.parameters("MultiplayerMZ")
     const BACKEND_SERVER_URL = parameters["backendServerUrl"]
     const DEBUG_MODE = parameters["enableDebug"]
+
+    function createPlayerEvent(x, y, characterName, characterIndex) {
+        const eventId = $dataMap.events.length;
+
+        // Create event data
+        const eventData = {
+            id: eventId,
+            name: "Player" + eventId,
+            x: x,
+            y: y,
+            pages: [{
+                conditions: {
+                    actorId: 1,
+                    actorValid: false,
+                    itemId: 1,
+                    itemValid: false,
+                    selfSwitchCh: "A",
+                    selfSwitchValid: false,
+                    switch1Id: 1,
+                    switch1Valid: false,
+                    switch2Id: 1,
+                    switch2Valid: false,
+                    variableId: 1,
+                    variableValid: false,
+                    variableValue: 0
+                },
+                image: {
+                    characterName: characterName,
+                    characterIndex: characterIndex,
+                    direction: 2,
+                    pattern: 1,
+                    tileId: 0
+                },
+                moveFrequency: 3,
+                moveRoute: { list: [{ code: 0 }], repeat: true, skippable: false, wait: false },
+                moveSpeed: 3,
+                moveType: 0,
+                priorityType: 1,
+                stepAnime: false,
+                through: false,
+                trigger: 0,
+                walkAnime: true,
+                directionFix: false,
+                list: []
+            }]
+        };
+
+        // Add to map
+        $dataMap.events[eventId] = eventData;
+
+        // Create game event
+        const gameEvent = new Game_Event($gameMap._mapId, eventId);
+        $gameMap._events[eventId] = gameEvent;
+
+        // Create sprite
+        const spriteset = SceneManager._scene._spriteset;
+        const sprite = new Sprite_Character(gameEvent);
+        spriteset._characterSprites.push(sprite);
+        spriteset._tilemap.addChild(sprite);
+
+        return { eventData, gameEvent };
+    }
 
     // Each player is an event with a sprite attached, and we need to store all of those events
     // Attached to their usernames
@@ -140,26 +200,20 @@
 
     // Handles other players movements
     function rpc_moveTo(username, x, y) {
-        const event = playerEvents[username];
-        if (!event) {
+        const playerEvent = playerEvents[username];
+        if (!playerEvent) {
             if (DEBUG_MODE) {
                 console.log("No event found for username:", username);
             }
             return;
         }
 
+        const gameEvent = playerEvent.gameEvent;
+
         if (DEBUG_MODE) {
             console.log(`Moving player ${username} to (${x}, ${y})`);
         }
 
-        // Get the underlying Game_Event object
-        const gameEvent = $gameMap._events[event.data.id];
-        if (!gameEvent) {
-            if (DEBUG_MODE) {
-                console.log("No game event found for username:", username);
-            }
-            return;
-        }
 
         // Determine direction based on movement
         const isLeft = x < gameEvent.x;
@@ -205,22 +259,10 @@
         }
 
         try {
-            const event = new MapEvent();
+            playerEvents[data.username] = createPlayerEvent(data.x, data.y, "Actor1", 0);
 
-            // Set the sprite properties
-            const image = event.data.pages[0].image;
-            image.characterName = "Actor1";
-            image.characterIndex = 0;
-            image.direction = 2; // Down facing
-            image.pattern = 1;
-            image.tileId = 0;
-            playerEvents[data.username] = event;
-
-            const spawnedEvent = event.spawn(data.x, data.y);
-            if (spawnedEvent) {
+            if (DEBUG_MODE) {
                 console.log('Multiplayer player created successfully');
-            } else {
-                console.error('Failed to spawn multiplayer player event');
             }
         } catch (error) {
             console.error('Error creating multiplayer player:', error);
