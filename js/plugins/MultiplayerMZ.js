@@ -113,25 +113,43 @@
 
     // Check if any player has completed their movement route and sync position
     function checkPlayerMovementComplete() {
-        for (const username in playerTargetPositions) {
-            const playerEvent = playerEvents[username];
-            if (!playerEvent) continue;
+        for (const key in playerTargetPositions) {
+            const targetPos = playerTargetPositions[key];
+            let gameEvent = null;
 
-            const gameEvent = playerEvent.gameEvent;
-            const targetPos = playerTargetPositions[username];
+            // Check if this is a party member key (format: "username_member_memberId")
+            if (key.includes("_member_")) {
+                const parts = key.split("_member_");
+                const username = parts[0];
+                const memberId = parseInt(parts[1]);
+                const arrayIndex = memberId - 1; // WHY MUST YOU BE A 1 BASED INDEX RPG MAKER
+
+                const playerEvent = playerEvents[username];
+                if (!playerEvent || !playerEvent.partyMembers[arrayIndex]) continue;
+
+                gameEvent = playerEvent.partyMembers[arrayIndex].gameEvent;
+            } else {
+                // This is a regular player key
+                const playerEvent = playerEvents[key];
+                if (!playerEvent) continue;
+
+                gameEvent = playerEvent.gameEvent;
+            }
+
+            if (!gameEvent) continue;
 
             // Check if the movement route has finished
             if (!gameEvent.isMoveRouteForcing()) {
                 // Movement complete, snap to exact target position to avoid desync
                 if (gameEvent.x !== targetPos.x || gameEvent.y !== targetPos.y) {
                     if (DEBUG_MODE) {
-                        console.log(`Syncing ${username} from (${gameEvent.x}, ${gameEvent.y}) to target (${targetPos.x}, ${targetPos.y})`);
+                        console.log(`Syncing ${key} from (${gameEvent.x}, ${gameEvent.y}) to target (${targetPos.x}, ${targetPos.y})`);
                     }
                     gameEvent.locate(targetPos.x, targetPos.y);
                 }
 
                 // Clear the target position after syncing
-                delete playerTargetPositions[username];
+                delete playerTargetPositions[key];
             }
         }
     }
@@ -188,7 +206,7 @@
                 return;
             }
 
-            moveTo(data.username, data.x, data.y)
+            player_moveTo(data.username, data.x, data.y)
         });
 
         socket.on("party_member_moved", (data) => {
@@ -197,7 +215,7 @@
                 return;
             }
 
-            // todo
+            party_moveTo(data.username, data.memberId, data.x, data.y);
         })
 
         socket.on("current_players", (players) => {
@@ -287,7 +305,7 @@
     }
 
     // Handles other players movements
-    function moveTo(username, x, y) {
+    function player_moveTo(username, x, y) {
         const playerEvent = playerEvents[username];
         if (!playerEvent) {
             if (DEBUG_MODE) {
@@ -304,6 +322,73 @@
 
         // Store the target position for syncing after movement completes
         playerTargetPositions[username] = { x: x, y: y };
+
+        // Configure the event to move smoothly with a walk animation and match the speed of normal players
+        gameEvent.setStepAnime(true)
+        gameEvent.setMoveSpeed(5);
+
+        // Calculate the distance from current position to target
+        const distanceX = x - gameEvent.x;
+        const distanceY = y - gameEvent.y;
+
+        // Build movement route for smooth movement
+        const moveRoute = {
+            list: [],
+            repeat: false,
+            skippable: false,
+            wait: false
+        };
+
+        // Push all vertical movements
+        for (let i = 0; i < Math.abs(distanceY); i++) {
+            if (distanceY > 0) {
+                moveRoute.list.push({ code: 1 }); // Move Down
+            } else if (distanceY < 0) {
+                moveRoute.list.push({ code: 4 }); // Move Up
+            }
+        }
+
+        // Push all horizontal movements
+        for (let i = 0; i < Math.abs(distanceX); i++) {
+            if (distanceX < 0) {
+                moveRoute.list.push({ code: 2 }); // Move Left
+            } else if (distanceX > 0) {
+                moveRoute.list.push({ code: 3 }); // Move Right
+            }
+        }
+
+        // Indicate that the route is finished and play the movement route
+        moveRoute.list.push({ code: 0 });
+        gameEvent.forceMoveRoute(moveRoute);
+    }
+
+    function party_moveTo(username, memberId, x, y) {
+        const playerEvent = playerEvents[username];
+        if (!playerEvent) {
+            if (DEBUG_MODE) {
+                console.log("No event found for username:", username);
+            }
+            return;
+        }
+
+        // Convert from 1-based memberId (Game_Follower._memberIndex) to 0-based array index
+        const arrayIndex = memberId - 1;
+
+        const partyMember = playerEvent.partyMembers[arrayIndex];
+        if (!partyMember) {
+            console.log(`No party member found for username: ${username}, memberId: ${memberId}, arrayIndex: ${arrayIndex}`);
+            console.log(`Available party members:`, Object.keys(playerEvent.partyMembers || {}));
+            return
+        }
+
+        const gameEvent = partyMember.gameEvent;
+
+        if (DEBUG_MODE) {
+            console.log(`Moving party member ${memberId} of player ${username} to (${x}, ${y})`);
+        }
+
+        // Store the target position for syncing after movement completes
+        playerTargetPositions[`${username}_member_${memberId}`] = { x: x, y: y };
 
         // Configure the event to move smoothly with a walk animation and match the speed of normal players
         gameEvent.setStepAnime(true)
@@ -391,7 +476,7 @@
             if (!actorId) continue;
 
             if (DEBUG_MODE) {
-                console.log(`Creating party member ${i + 1} (Actor ID: ${actorId}) for player ${username}`);
+                console.log(`Creating party member ${i} (Actor ID: ${actorId}) for player ${username}`);
             }
 
             // Get the actor data to determine the character sprite
@@ -411,7 +496,11 @@
             );
 
             partyMember.gameEvent.setThrough(true);
-            playerEvent.partyMembers.push(partyMember);
+            playerEvent.partyMembers[i] = partyMember;
+        }
+
+        if (DEBUG_MODE) {
+            console.log(`Final partyMembers array for ${username}:`, playerEvent.partyMembers);
         }
     }
 
@@ -450,8 +539,10 @@
                     const actorId = data.partyMembers[i];
                     if (!actorId) continue;
 
+                    const memberIndex = i - 1; // Convert to 0-based index for followers
+
                     if (DEBUG_MODE) {
-                        console.log(`Creating party member ${i} (Actor ID: ${actorId}) for player ${data.username}`);
+                        console.log(`Creating party member ${memberIndex} (Actor ID: ${actorId}) for player ${data.username}`);
                     }
 
                     // Get the actor data to determine the character sprite
@@ -471,7 +562,7 @@
                     );
                     partyMember.gameEvent.setThrough(true);
 
-                    player.partyMembers.push(partyMember);
+                    player.partyMembers[memberIndex] = partyMember;
                 }
             }
 
